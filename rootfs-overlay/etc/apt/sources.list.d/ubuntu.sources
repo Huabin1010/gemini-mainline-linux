@@ -1,0 +1,13 @@
+# Ubuntu 26.04 (resolute) arm64 — Tsinghua ubuntu-ports.
+# Security stays on ports.ubuntu.com (TUNA recommends not mirroring security).
+Types: deb
+URIs: https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports
+Suites: resolute resolute-updates resolute-backports
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg
+
+Types: deb
+URIs: http://ports.ubuntu.com/ubuntu-ports/
+Suites: resolute-security
+Components: main restricted universe multiverse
+Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg

@@ -1,0 +1,3 @@
+# Login user auto-login on ttyGS0 / GNOME. Let reboot-fastboot run without a password.
+hhb1010 ALL=(root) NOPASSWD: /usr/local/sbin/reboot-fastboot, /sbin/reboot, /usr/bin/nmcli, /usr/local/sbin/gemini-wifi-connect.sh
+umeko ALL=(root) NOPASSWD: /usr/local/sbin/reboot-fastboot, /sbin/reboot, /usr/bin/nmcli, /usr/local/sbin/gemini-wifi-connect.sh

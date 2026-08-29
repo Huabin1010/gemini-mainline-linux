@@ -1,0 +1,4 @@
+console=tty0 root=UUID=<rootfs-uuid> rw loglevel=3 maxcpus=4
+# LK extras from TWRP /proc/cmdline:
+# androidboot.bootdevice=624000.ufshc androidboot.hwversion=1.4.0
+# mdss_mdp.panel=1:dsi:0:qcom,mdss_dsi_jdi_fhd_r63452_cmd:1:none:cfg:single_dsi

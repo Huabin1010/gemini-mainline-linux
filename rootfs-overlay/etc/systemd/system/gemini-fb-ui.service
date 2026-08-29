@@ -1,0 +1,14 @@
+[Unit]
+Description=Gemini framebuffer test pattern and Volume-Up reboot-fastboot
+After=display-unblank.service local-fs.target
+Wants=display-unblank.service
+Conflicts=gdm.service gdm3.service display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/gemini-fb-ui
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Reboot to Fastboot
+Name[zh_CN]=重启到 Fastboot
+Comment=Reboot this phone into the bootloader (fastboot)
+Comment[zh_CN]=重启进 bootloader（fastboot），方便电脑 fastboot boot
+Exec=/usr/local/sbin/reboot-fastboot
+Icon=system-reboot
+Terminal=false
+Categories=System;Settings;
+Keywords=fastboot;bootloader;reboot;

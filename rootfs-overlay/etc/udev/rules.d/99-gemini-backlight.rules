@@ -1,0 +1,3 @@
+# WLED sysfs notify on every brightness write. HUD dragging used to
+# fire this at ~60 Hz and systemd-backlight / udev-worker cooked the SoC.
+ACTION=="change", SUBSYSTEM=="backlight", ENV{SYSTEMD_WANTS}=""

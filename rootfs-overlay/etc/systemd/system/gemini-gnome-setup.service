@@ -1,0 +1,15 @@
+[Unit]
+Description=Install and enable GNOME on gemini (once)
+Wants=network-online.target
+After=network-online.target NetworkManager.service gemini-fb-ui.service
+ConditionPathExists=!/var/lib/gemini-gnome-setup.done
+# Do not block boot or isolate graphical — GDM currently blacks the panel.
+
+[Service]
+Type=oneshot
+TimeoutStartSec=30
+ExecStart=/usr/local/sbin/gemini-gnome-setup.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

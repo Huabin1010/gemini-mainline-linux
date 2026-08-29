@@ -1,0 +1,58 @@
+# Build outputs
+/out/
+/linux/
+
+# Kernel build tree
+*.o
+*.ko
+*.mod
+*.mod.c
+*.cmd
+.tmp_versions/
+Module.symvers
+modules.order
+
+# Editor
+*.swp
+*~
+__pycache__/
+*.pyc
+
+# Large firmware blobs (keep README only)
+firmware/gemini/*.mbn
+firmware/gemini/*.elf
+firmware/gemini/*.mdt
+firmware/gemini/*.b00
+firmware/gemini/*.b01
+firmware/gemini/*.b02
+firmware/gemini/ath10k/**
+!firmware/gemini/ath10k/README.md
+!firmware/gemini/ath10k/README.zh-CN.md
+rootfs-overlay/etc/gemini-root-password
+
+# Device backups, MACs, live dumps
+inventory/**/*.img
+inventory/**/dmesg.txt
+inventory/**/journal-boot.txt
+inventory/**/*.mac.txt
+inventory/**/*.xxd
+inventory/**/hw-dump/
+inventory/**/*.tar.gz
+inventory/**/hw-dump-LATEST.txt
+inventory/firmware/
+inventory/uart-gemini/*.html
+inventory/uart-gemini/wayback-*.txt
+
+# Local scratch
+/tmp/
+.cursor/
+
+# Proprietary schematic / screenshots (not part of the public tree)
+/Xiaomi+Mi+5+Schematic.pdf
+/image.png
+/image copy.png
+
+# Sanitized Release copy of the live rootfs (built locally)
+/out/rootfs-release.ext4
+/out/rootfs.ext4.zst
+/out/rootfs-release.ext4.zst

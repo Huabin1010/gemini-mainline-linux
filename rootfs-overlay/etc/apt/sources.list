@@ -1,0 +1,2 @@
+# Ubuntu 26.04 sources are in sources.list.d/ubuntu.sources (DEB822).
+# Tsinghua ubuntu-ports + official security. Do not add One-Line deb entries here.

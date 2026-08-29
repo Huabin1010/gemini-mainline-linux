@@ -1,0 +1,12 @@
+[Unit]
+Description=Gemini hardware inventory dump (oneshot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gemini-hw-dump.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

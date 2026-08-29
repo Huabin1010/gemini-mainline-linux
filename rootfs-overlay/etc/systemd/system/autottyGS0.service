@@ -1,0 +1,15 @@
+[Unit]
+Description=USB g_serial login on ttyGS0
+# Do not enable together with serial-getty@ttyGS0 — two agetty on one
+# gadget port split ACM input. build-initramfs.sh masks this unit.
+After=sysinit.target
+ConditionPathExists=/dev/ttyGS0
+
+[Service]
+ExecStart=-/sbin/agetty --autologin hhb1010 --keep-baud 115200,38400,9600 ttyGS0 linux
+Type=idle
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

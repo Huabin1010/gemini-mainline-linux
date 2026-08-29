@@ -1,0 +1,303 @@
+#!/usr/bin/env bash
+# Fake nmcli for gemini-wifi-connect.sh. State dir: $FAKE_NM_STATE
+set -euo pipefail
+STATE="${FAKE_NM_STATE:?}"
+cmd=("$@")
+
+ssid_of() {
+	local id="$1"
+	if [[ -f "$STATE/ssid.$id" ]]; then
+		cat "$STATE/ssid.$id"
+	fi
+}
+
+# Strip -c no -w N -t -g -s -f FIELD
+args=()
+gfield=""
+show_secrets=0
+fields=""
+active_only=0
+i=0
+while [[ $i -lt ${#cmd[@]} ]]; do
+	a="${cmd[$i]}"
+	case "$a" in
+	-c|-w|-f)
+		i=$((i + 2))
+		if [[ "$a" == -f ]]; then
+			fields="${cmd[$((i - 1))]:-}"
+		fi
+		continue
+		;;
+	-t|-s)
+		[[ "$a" == -s ]] && show_secrets=1
+		i=$((i + 1))
+		continue
+		;;
+	-g)
+		gfield="${cmd[$((i + 1))]:-}"
+		i=$((i + 2))
+		continue
+		;;
+	--active)
+		active_only=1
+		i=$((i + 1))
+		continue
+		;;
+	--rescan)
+		i=$((i + 2))
+		continue
+		;;
+	esac
+	args+=("$a")
+	i=$((i + 1))
+done
+
+sub="${args[0]:-}"
+obj="${args[1]:-}"
+
+case "$sub $obj" in
+"radio wifi"|"networking on"|"device set")
+	exit 0
+	;;
+esac
+
+if [[ "$sub" == device && "$obj" == status ]]; then
+	if [[ -f "$STATE/active" ]]; then
+		id=$(cat "$STATE/active")
+		ss=$(cat "$STATE/ssid.$id" 2>/dev/null || echo "$id")
+		st="connected"
+		[[ -f "$STATE/activating" ]] && st="connecting"
+		echo "wlan0:wifi:$st:$ss"
+		echo "wlp1s0:wifi:$st:$ss"
+	else
+		echo "wlan0:wifi:disconnected:"
+		echo "wlp1s0:wifi:disconnected:"
+	fi
+	exit 0
+fi
+
+if [[ "$sub" == device && "$obj" == disconnect ]]; then
+	rm -f "$STATE/active"
+	exit 0
+fi
+
+if [[ "$sub" == device && "$obj" == wifi ]]; then
+	act="${args[2]:-}"
+	if [[ "$act" == connect ]]; then
+		ssid="${args[3]:-}"
+		pw=""
+		i=4
+		while [[ $i -lt ${#args[@]} ]]; do
+			case "${args[$i]}" in
+			password)
+				pw="${args[$((i + 1))]:-}"
+				i=$((i + 2))
+				continue
+				;;
+			ifname)
+				i=$((i + 2))
+				continue
+				;;
+			esac
+			i=$((i + 1))
+		done
+		if [[ -f "$STATE/up_noop" ]]; then
+			exit 1
+		fi
+		if [[ -f "$STATE/mismatch" ]]; then
+			echo "Error: Connection activation failed: (7) Secrets were required, but not provided." >&2
+			echo "Activation: (wifi) psk mismatch reported by supplicant, asking for new key" >&2
+			exit 1
+		fi
+		echo "$ssid" >"$STATE/ssid.$ssid"
+		echo wpa-psk >"$STATE/km.$ssid"
+		echo 0 >"$STATE/flags.$ssid"
+		echo "$pw" >"$STATE/psk.$ssid"
+		echo "$ssid" >"$STATE/active"
+		exit 0
+	fi
+	# list
+	if [[ -f "$STATE/active" ]]; then
+		id=$(cat "$STATE/active")
+		ss=$(cat "$STATE/ssid.$id" 2>/dev/null || echo "$id")
+		echo "*:$ss"
+	fi
+	for f in "$STATE"/ssid.*; do
+		[[ -f "$f" ]] || continue
+		ss=$(cat "$f")
+		if [[ -f "$STATE/active" ]]; then
+			id=$(cat "$STATE/active")
+			actss=$(cat "$STATE/ssid.$id" 2>/dev/null || echo "$id")
+			[[ "$ss" == "$actss" ]] && continue
+		fi
+		echo " :$ss"
+	done
+	exit 0
+fi
+
+if [[ "$sub" == connection && "$obj" == show ]]; then
+	if [[ -n "$gfield" ]]; then
+		id="${args[2]:-}"
+		case "$gfield" in
+		802-11-wireless.ssid)
+			ssid_of "$id"
+			exit 0
+			;;
+		802-11-wireless-security.key-mgmt)
+			cat "$STATE/km.$id" 2>/dev/null || true
+			exit 0
+			;;
+		802-11-wireless-security.psk-flags)
+			cat "$STATE/flags.$id" 2>/dev/null || echo 0
+			exit 0
+			;;
+		802-11-wireless-security.psk)
+			if [[ "$show_secrets" == 1 ]]; then
+				# Default: hide PSK like real nmcli without agent.
+				if [[ -f "$STATE/psk_visible" ]]; then
+					cat "$STATE/psk.$id" 2>/dev/null || true
+				fi
+			fi
+			exit 0
+			;;
+		esac
+		exit 0
+	fi
+	if [[ "$fields" == UUID,TYPE || "$fields" == UUID,TYPE,* ]]; then
+		if [[ "$active_only" == 1 ]]; then
+			if [[ -f "$STATE/active" ]]; then
+				id=$(cat "$STATE/active")
+				echo "$id:802-11-wireless"
+			fi
+		else
+			if [[ -d "$STATE" ]]; then
+				for f in "$STATE"/ssid.*; do
+					[[ -f "$f" ]] || continue
+					id=${f##*.}
+					echo "$id:802-11-wireless"
+				done
+			fi
+		fi
+		exit 0
+	fi
+	exit 0
+fi
+
+if [[ "$sub" == connection && "$obj" == up ]]; then
+	id="${args[2]:-}"
+	has_pf=0
+	for a in "${args[@]}"; do
+		if [[ "$a" == passwd-file ]]; then
+			has_pf=1
+			break
+		fi
+	done
+	if [[ -f "$STATE/up_noop" ]]; then
+		exit 0
+	fi
+	if [[ -f "$STATE/mismatch" ]]; then
+		echo "Error: Connection activation failed: (7) Secrets were required, but not provided." >&2
+		echo "Activation: (wifi) psk mismatch reported by supplicant, asking for new key" >&2
+		exit 1
+	fi
+	if [[ -f "$STATE/need_passwd_file" && "$has_pf" != 1 ]]; then
+		echo "Warning: password for '802-11-wireless-security.psk' not given in 'passwd-file' and nmcli cannot ask without '--ask' option." >&2
+		echo "Error: Connection activation failed: Secrets were required, but not provided." >&2
+		exit 1
+	fi
+	# name-based up: id is SSID
+	if [[ -f "$STATE/ssid.$id" ]] || grep -qx "$id" "$STATE"/ssid.* 2>/dev/null; then
+		echo "$id" >"$STATE/active" || true
+		# If id is ssid not uuid, store uuid-less active by matching
+		for f in "$STATE"/ssid.*; do
+			[[ -f "$f" ]] || continue
+			if [[ "$(cat "$f")" == "$id" ]]; then
+				echo "${f##*.}" >"$STATE/active"
+			fi
+		done
+		exit 0
+	fi
+	# uuid
+	if [[ -f "$STATE/ssid.$id" ]]; then
+		echo "$id" >"$STATE/active"
+		exit 0
+	fi
+	echo "Error: unknown connection" >&2
+	exit 1
+fi
+
+if [[ "$sub" == connection && "$obj" == delete ]]; then
+	id="${args[2]:-}"
+	if [[ "$id" == id || "$id" == uuid || "$id" == path ]]; then
+		id="${args[3]:-}"
+	fi
+	rm_conn() {
+		local x="$1"
+		rm -f "$STATE/ssid.$x" "$STATE/km.$x" "$STATE/flags.$x" "$STATE/psk.$x"
+		if [[ -f "$STATE/active" && "$(cat "$STATE/active")" == "$x" ]]; then
+			rm -f "$STATE/active"
+		fi
+	}
+	rm_conn "$id"
+	for f in "$STATE"/ssid.*; do
+		[[ -f "$f" ]] || continue
+		if [[ "$(cat "$f")" == "$id" ]]; then
+			rm_conn "${f##*.}"
+		fi
+	done
+	exit 0
+fi
+
+if [[ "$sub" == connection && "$obj" == add ]]; then
+	# parse ssid / con-name / key-mgmt / psk / psk-flags
+	name=""
+	ssid=""
+	km=""
+	psk=""
+	flags="0"
+	i=0
+	while [[ $i -lt ${#args[@]} ]]; do
+		case "${args[$i]}" in
+		con-name) name="${args[$((i + 1))]:-}"; i=$((i + 2)); continue ;;
+		ssid) ssid="${args[$((i + 1))]:-}"; i=$((i + 2)); continue ;;
+		wifi-sec.key-mgmt) km="${args[$((i + 1))]:-}"; i=$((i + 2)); continue ;;
+		wifi-sec.psk) psk="${args[$((i + 1))]:-}"; i=$((i + 2)); continue ;;
+		wifi-sec.psk-flags) flags="${args[$((i + 1))]:-}"; i=$((i + 2)); continue ;;
+		esac
+		i=$((i + 1))
+	done
+	id="${name:-$ssid}"
+	echo "$ssid" >"$STATE/ssid.$id"
+	echo "${km:-wpa-psk}" >"$STATE/km.$id"
+	echo "$flags" >"$STATE/flags.$id"
+	echo "$psk" >"$STATE/psk.$id"
+	exit 0
+fi
+
+if [[ "$sub" == connection && "$obj" == modify ]]; then
+	id="${args[2]:-}"
+	i=3
+	while [[ $i -lt ${#args[@]} ]]; do
+		case "${args[$i]}" in
+		wifi-sec.key-mgmt)
+			echo "${args[$((i + 1))]:-}" >"$STATE/km.$id"
+			i=$((i + 2))
+			continue
+			;;
+		wifi-sec.psk)
+			echo "${args[$((i + 1))]:-}" >"$STATE/psk.$id"
+			i=$((i + 2))
+			continue
+			;;
+		wifi-sec.psk-flags)
+			echo "${args[$((i + 1))]:-}" >"$STATE/flags.$id"
+			i=$((i + 2))
+			continue
+			;;
+		esac
+		i=$((i + 1))
+	done
+	exit 0
+fi
+
+exit 0

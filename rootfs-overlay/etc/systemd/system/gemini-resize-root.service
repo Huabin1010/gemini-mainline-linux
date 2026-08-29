@@ -1,0 +1,12 @@
+[Unit]
+Description=Resize root ext4 to fill userdata
+After=local-fs.target
+ConditionPathExists=!/var/lib/gemini-resize-root.done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/gemini-resize-root.sh
+ExecStartPost=/bin/touch /var/lib/gemini-resize-root.done
+
+[Install]
+WantedBy=multi-user.target

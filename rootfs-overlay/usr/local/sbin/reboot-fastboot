@@ -1,0 +1,46 @@
+#!/bin/sh
+# Reboot into Qualcomm/Android fastboot (bootloader).
+# Same command string as Kernel-Build/ginkgo: PON mode-bootloader + reset.
+# Do not poke IMEM or pshold — both hung MSM8996 gemini.
+# Skip systemd shutdown: 7.0 can blank the panel there and never reset.
+
+set -eu
+
+if [ "$(id -u)" -ne 0 ]; then
+	exec sudo -n /usr/local/sbin/reboot-fastboot "$@"
+fi
+
+log=/var/log/reboot-fastboot.log
+ts=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo now)
+echo "$ts pid=$$ RESTART2 bootloader" >>"$log" 2>/dev/null || true
+sync
+
+if [ -x /usr/local/sbin/reboot-bootloader ]; then
+	exec /usr/local/sbin/reboot-bootloader
+fi
+
+python3 - <<'PY'
+import ctypes, ctypes.util, os, sys
+
+# aarch64
+SYS_reboot = 142
+LINUX_REBOOT_MAGIC1 = 0xFEE1DEAD
+LINUX_REBOOT_MAGIC2 = 672274793
+LINUX_REBOOT_CMD_RESTART2 = 0xA1B2C3D4
+
+lib = ctypes.util.find_library("c") or "libc.so.6"
+libc = ctypes.CDLL(lib, use_errno=True)
+os.sync()
+ret = libc.syscall(
+    ctypes.c_long(SYS_reboot),
+    ctypes.c_long(LINUX_REBOOT_MAGIC1),
+    ctypes.c_long(LINUX_REBOOT_MAGIC2),
+    ctypes.c_long(LINUX_REBOOT_CMD_RESTART2),
+    ctypes.c_char_p(b"bootloader"),
+)
+sys.stderr.write("reboot syscall returned %s errno=%s\n" % (ret, ctypes.get_errno()))
+sys.exit(1)
+PY
+
+echo "$ts python syscall failed, reboot -f" >>"$log" 2>/dev/null || true
+exec /sbin/reboot -f bootloader
