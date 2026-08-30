@@ -21,6 +21,7 @@ English is the default. Chinese originals live in [`zh-CN/`](zh-CN/README.md). E
 | 2026-08-28 | [Display scanout + reboot-fastboot](display-and-reboot-fastboot-7.0.md) |
 | 2026-08-28 | [Fuel gauge, Docker, Adreno 3D](worklog-2026-08-28.md) |
 | 2026-08-29 | [HUD Wi-Fi join / password / forget](worklog-2026-08-29.md) |
+| 2026-08-30 | [Blank suspend / white cluster](worklog-2026-08-30.md) |
 
 ## Other
 

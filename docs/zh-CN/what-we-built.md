@@ -108,9 +108,10 @@ cmdline（`scripts/build-bootimg.sh`）：
 
 ```text
 console=ttyGS0,115200 console=tty0 ignore_loglevel loglevel=8
-clk_ignore_unused pd_ignore_unused
 root=/dev/disk/by-partlabel/userdata rootwait rw maxcpus=4
 ```
+
+（2026-08-30 起不再带 `clk_ignore_unused pd_ignore_unused`，否则灭屏闸不住 DSI/GFX 时钟。详见 [`worklog-2026-08-30.md`](worklog-2026-08-30.md)。）
 
 不要 `earlycon` 打到 `0x7570000`（那是蓝牙 UART `blsp1_uart2`，会早死）。  
 不要 `panic=10`、不要 `nowatchdog`。  

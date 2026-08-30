@@ -21,6 +21,7 @@
 | 2026-08-28 | [显示扫描 + reboot-fastboot](display-and-reboot-fastboot-7.0.md) |
 | 2026-08-28 | [电量计、Docker、Adreno 3D](worklog-2026-08-28.md) |
 | 2026-08-29 | [HUD 选网 / 密码 / 忘记](worklog-2026-08-29.md) |
+| 2026-08-30 | [灭屏 suspend / 右侧白条](worklog-2026-08-30.md) |
 
 ## 其它
 
