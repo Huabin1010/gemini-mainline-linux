@@ -19,6 +19,7 @@
 #include <linux/reboot.h>
 #include <math.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -89,7 +90,7 @@ static int mt_nslots = MAX_SLOTS;
 static int mt_bind_slot = -1;
 static int slot_x, slot_y, slot_id = -1, down_x, down_y, dragging;
 static int contact_armed;
-static uint64_t t_power_key, t_contact, t_down;
+static uint64_t t_power_key, t_contact, t_down, t_hud_start;
 static int last_raw_x, last_raw_y, last_raw_ok;
 static int list_scroll, list_scroll_tgt;
 static enum sheet sheet, sheet_tgt;
@@ -154,8 +155,18 @@ static int bl_max, bl_cur, bl_pct = -1, bl_keep = 80, dragging_bl;
 static char bl_path[192];
 static char bl_power_path[192];
 static int hud_dirty = 1;
-static uint64_t t_scan_input, t_unblank;
+static uint64_t t_scan_input, t_unblank, t_user, t_blank;
 static int screen_off;
+static int pending_bl;
+static int pending_bl_frames;
+#define HUD_UNBLANK_FRAMES 24
+static int touch_need_idle;
+static unsigned ghost_syn, ghost_finger, unblank_logged;
+#define HUD_UNBLANK_HOLD_NS 1500000000ull
+#define HUD_UNBLANK_METRIC_NS 2000000000ull
+#define GPU_POWER_CTRL "/sys/devices/platform/soc@0/b00000.gpu/power/control"
+
+#define HUD_IDLE_OFF_NS 600000000000ull
 static int mt_got_pos;
 static unsigned long rx_bps, tx_bps;
 static unsigned long long net_rx_b, net_tx_b;
@@ -173,6 +184,28 @@ static const char *T(const char *zh, const char *en)
 static void dirty(void)
 {
 	hud_dirty = 1;
+}
+
+static uint64_t nsec_now(void);
+
+static void note_user(void)
+{
+	t_user = nsec_now();
+}
+
+static int hud_animating(void)
+{
+	if (dragging || dragging_bl)
+		return 1;
+	if (sheet_tgt != SHEET_NONE && fabsf(sheet_t - 1.0f) > 0.01f)
+		return 1;
+	if (sheet_tgt == SHEET_NONE && sheet_t > 0.01f)
+		return 1;
+	if (osk_u > 0.012f)
+		return 1;
+	if (abs(list_scroll_tgt - list_scroll) > 1)
+		return 1;
+	return 0;
 }
 
 static void logmsg(const char *msg)
@@ -264,11 +297,17 @@ static void perf_add(int loop_us, int cpu_us, int draw_us, int wait_us,
 		last_h[i].sheet = (int)(sheet_t * 100.0f);
 		last_h_i++;
 	}
-	if (loop_us > 33000) {
+	/* Idle HUD is 5 fps (~200 ms). Do not spam kmsg on every frame. */
+	if (hud_animating() && loop_us > 50000) {
 		snprintf(line, sizeof(line),
 			 "hitch %d us cpu=%d draw=%d wait=%d after=%d nv=%d flush=%d wto=%d met=%d s=%d %s",
 			 loop_us, cpu_us, draw_us, wait_us, after_us, nv, nf, wto, met,
 			 (int)(sheet_t * 100.0f), perf_slow);
+		logmsg(line);
+	} else if (loop_us > 400000) {
+		snprintf(line, sizeof(line),
+			 "stall %d us cpu=%d draw=%d wait=%d after=%d",
+			 loop_us, cpu_us, draw_us, wait_us, after_us);
 		logmsg(line);
 	}
 }
@@ -305,12 +344,15 @@ static void perf_dump(uint64_t now)
 		}
 		fclose(f);
 	}
-	snprintf(line, sizeof(line),
-		 "perf n=%u avg=%uus max=%luus hitch20=%u hitch33=%u hist=%u/%u/%u/%u/%u/%u",
-		 perf_n, avg, perf_max_us, perf_h20, perf_h33,
-		 perf_bkt[0], perf_bkt[1], perf_bkt[2], perf_bkt[3],
-		 perf_bkt[4], perf_bkt[5]);
-	logmsg(line);
+	/* File always; kmsg only when we were trying to hit ~30 fps. */
+	if (avg < 80000) {
+		snprintf(line, sizeof(line),
+			 "perf n=%u avg=%uus max=%luus hitch20=%u hitch33=%u hist=%u/%u/%u/%u/%u/%u",
+			 perf_n, avg, perf_max_us, perf_h20, perf_h33,
+			 perf_bkt[0], perf_bkt[1], perf_bkt[2], perf_bkt[3],
+			 perf_bkt[4], perf_bkt[5]);
+		logmsg(line);
+	}
 }
 
 static int clampi(int v, int a, int b)
@@ -813,11 +855,32 @@ static void sample_temp(void)
 
 static char batt_ua_path[192], batt_uv_path[192], batt_cap_path[192];
 static char batt_st_path[192];
-static int batt_cached, batt_adc_done;
+static int batt_cached, batt_adc_started;
+
+static void *batt_adc_loop(void *arg)
+{
+	(void)arg;
+	for (;;) {
+		long ua = read_long(batt_ua_path);
+		long uv = read_long(batt_uv_path);
+
+		if (uv >= 1000000) {
+			int mw = (int)((labs(ua) * (unsigned long long)uv) /
+				       1000000000ull);
+
+			if (mw != batt_mw) {
+				batt_mw = mw;
+				dirty();
+			}
+		}
+		usleep(2000000);
+	}
+	return NULL;
+}
 
 static void sample_batt(void)
 {
-	long ua = 0, uv = 0, cap = -1;
+	long cap = -1;
 	char st[32];
 	int fd;
 	ssize_t n;
@@ -875,16 +938,21 @@ static void sample_batt(void)
 		}
 	}
 	/*
-	 * current_now/voltage_now kick a QPNP ADC conversion (~800–900 ms).
-	 * Do it once before the 60 fps loop, never on the hot path.
+	 * current_now/voltage_now can stall ~800 ms on QPNP ADC.
+	 * Keep that off the 60 fps thread: one blocking read at start,
+	 * then a 2 s worker.
 	 */
-	if (!batt_adc_done) {
-		ua = read_long(batt_ua_path);
-		uv = read_long(batt_uv_path);
-		batt_adc_done = 1;
+	if (!batt_adc_started) {
+		pthread_t th;
+		long ua = read_long(batt_ua_path);
+		long uv = read_long(batt_uv_path);
+
 		if (uv >= 1000000)
 			batt_mw = (int)((labs(ua) * (unsigned long long)uv) /
 					1000000000ull);
+		batt_adc_started = 1;
+		if (pthread_create(&th, NULL, batt_adc_loop, NULL) == 0)
+			pthread_detach(th);
 	}
 	batt_ok = 1;
 }
@@ -1711,6 +1779,120 @@ static void write_sysfs(const char *path, const char *s)
 	close(fd);
 }
 
+static void gpu_runtime_pin(int pin)
+{
+	write_sysfs(GPU_POWER_CTRL, pin ? "on\n" : "auto\n");
+}
+
+static void cpu_idle_blank(int off)
+{
+	static const char *gov[4];
+	static char saved[4][32];
+	static int gold_saved = 1;
+	int i;
+
+	for (i = 0; i < 4; i++) {
+		char path[80];
+
+		snprintf(path, sizeof(path),
+			 "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor",
+			 i);
+		if (off) {
+			int fd = open(path, O_RDONLY | O_CLOEXEC);
+			ssize_t n;
+
+			if (fd >= 0) {
+				n = read(fd, saved[i], sizeof(saved[i]) - 1);
+				close(fd);
+				if (n > 0) {
+					while (n > 0 && (saved[i][n - 1] == '\n' ||
+							  saved[i][n - 1] == '\r'))
+						n--;
+					saved[i][n] = 0;
+					gov[i] = saved[i];
+				}
+			}
+			write_sysfs(path, "powersave\n");
+		} else if (gov[i] && gov[i][0]) {
+			write_sysfs(path, gov[i]);
+		} else {
+			write_sysfs(path, "schedutil\n");
+		}
+	}
+	if (off) {
+		char st[8] = "";
+		int fd = open("/sys/devices/system/cpu/cpu2/online",
+			      O_RDONLY | O_CLOEXEC);
+		ssize_t n;
+
+		gold_saved = 1;
+		if (fd >= 0) {
+			n = read(fd, st, sizeof(st) - 1);
+			close(fd);
+			if (n > 0 && st[0] == '0')
+				gold_saved = 0;
+		}
+		write_sysfs("/sys/devices/system/cpu/cpu2/online", "0\n");
+		write_sysfs("/sys/devices/system/cpu/cpu3/online", "0\n");
+		write_sysfs("/sys/devices/platform/soc@0/6af8800.usb/power/control",
+			    "auto\n");
+		write_sysfs("/sys/devices/platform/soc@0/7411000.phy/power/control",
+			    "auto\n");
+	} else {
+		if (gold_saved) {
+			write_sysfs("/sys/devices/system/cpu/cpu2/online", "1\n");
+			write_sysfs("/sys/devices/system/cpu/cpu3/online", "1\n");
+		}
+		write_sysfs("/sys/devices/platform/soc@0/6af8800.usb/power/control",
+			    "on\n");
+		for (i = 0; i < 4; i++) {
+			char path[80];
+
+			snprintf(path, sizeof(path),
+				 "/sys/devices/system/cpu/cpu%d/cpufreq/scaling_governor",
+				 i);
+			if (gov[i] && gov[i][0])
+				write_sysfs(path, gov[i]);
+			else
+				write_sysfs(path, "schedutil\n");
+		}
+		return;
+	}
+}
+
+static int mt_kernel_live(void)
+{
+	int s;
+
+	for (s = 0; s < mt_nslots && s < MAX_SLOTS; s++) {
+		if (mt_id[s] >= 0)
+			return 1;
+	}
+	return 0;
+}
+
+static void unblank_metric(const char *tag)
+{
+	char line[192];
+
+	snprintf(line, sizeof(line),
+		 "%s ghost_syn=%u ghost_finger=%u hold_ms=%u pending_bl=%d",
+		 tag, ghost_syn, ghost_finger,
+		 (unsigned)(HUD_UNBLANK_HOLD_NS / 1000000ull), pending_bl);
+	logmsg(line);
+}
+
+static void restore_backlight(void)
+{
+	if (bl_power_path[0])
+		write_sysfs(bl_power_path, "0\n");
+	bl_cur = 0;
+	apply_bl_pct(bl_keep > 0 ? bl_keep : 80);
+	pending_bl = 0;
+	pending_bl_frames = 0;
+	logmsg("backlight after warmup");
+}
+
 static void reset_touch(void)
 {
 	int s;
@@ -1744,20 +1926,27 @@ static void set_screen(int on)
 		screen_off = 0;
 		reset_touch();
 		t_unblank = nsec_now();
+		note_user();
 		dragging = 0;
 		dragging_bl = 0;
 		contact_armed = 0;
+		ghost_syn = 0;
+		ghost_finger = 0;
+		unblank_logged = 0;
+		touch_need_idle = 1;
+		pending_bl = 1;
+		pending_bl_frames = 0;
+		cpu_idle_blank(0);
+		ensure_gpu_open();
+		gpu_runtime_pin(1);
 		if (use_gl)
 			hud_gl_blank(0);
 		if (!use_gl) {
 			write_sysfs("/sys/class/graphics/fb0/blank", "0\n");
 			if (fb_fd >= 0)
 				ioctl(fb_fd, FBIOBLANK, FB_BLANK_UNBLANK);
+			restore_backlight();
 		}
-		if (bl_power_path[0])
-			write_sysfs(bl_power_path, "0\n");
-		bl_cur = 0;
-		apply_bl_pct(bl_keep > 0 ? bl_keep : 80);
 		dirty();
 		logmsg("screen on");
 		return;
@@ -1765,9 +1954,17 @@ static void set_screen(int on)
 	if (screen_off)
 		return;
 	screen_off = 1;
+	t_blank = nsec_now();
+	pending_bl = 0;
 	if (dragging_bl)
 		bl_pct = bl_keep;
 	reset_touch();
+	gpu_runtime_pin(0);
+	cpu_idle_blank(1);
+	if (drm_fd >= 0) {
+		close(drm_fd);
+		drm_fd = -1;
+	}
 	if (bl_path[0])
 		write_sysfs(bl_path, "0\n");
 	bl_cur = 0;
@@ -2141,6 +2338,8 @@ static void kick_pending(void)
 		wifi_connect(pend_ssid, pend_pass, pend_sec);
 		return;
 	}
+	if (screen_off)
+		return;
 	if (want_scan) {
 		want_scan = 0;
 		wifi_scan();
@@ -3513,16 +3712,42 @@ static void handle_ev(int idx, uint16_t type, uint16_t code, int32_t value)
 		return;
 	}
 	if (type == EV_KEY && value == 1 && code == KEY_POWER) {
+		/* Drop leftover PON events from boot / fastboot. */
+		if (!t_hud_start || now - t_hud_start < 2000000000ull)
+			return;
 		if (now - t_power_key < 400000000ull)
+			return;
+		/* Warmup is still black. A second press would blank. */
+		if (!screen_off &&
+		    (pending_bl ||
+		     (t_unblank && now - t_unblank < 1500000000ull)))
 			return;
 		t_power_key = now;
 		set_screen(screen_off);
 		return;
 	}
 	if (is_touch[idx] && t_unblank &&
-	    now - t_unblank < 250000000ull)
+	    now - t_unblank < HUD_UNBLANK_HOLD_NS) {
+		if (type == EV_SYN) {
+			mt_sync_from_kernel(pfds[idx].fd);
+			ghost_syn++;
+			if (mt_kernel_live())
+				ghost_finger++;
+			else if (now - t_unblank >= HUD_UNBLANK_HOLD_NS)
+				touch_need_idle = 0;
+		} else if (type == EV_ABS || type == EV_KEY)
+			ghost_syn++;
 		return;
+	}
+	if (!screen_off)
+		note_user();
 	if (screen_off) {
+		/*
+		 * PHY/0x11 resume injects incell SYN noise. Ignore it
+		 * for a few seconds after blank so it cannot wake us.
+		 */
+		if (t_blank && now - t_blank < 3000000000ull)
+			return;
 		/* Only a real finger (id + x + y) wakes. Pressure
 		 * on empty slots and BTN_TOUCH emulation are hover junk. */
 		if (is_touch[idx] && has_mt[idx] && type == EV_ABS) {
@@ -3786,11 +4011,13 @@ static void wait_deadline(uint64_t deadline)
 	int i, n, wait_ms;
 
 	while (nsec_now() < deadline) {
+		int off0 = screen_off;
+
 		now = nsec_now();
 		rem = deadline - now;
 		wait_ms = (int)(rem / 1000000ull);
-		if (wait_ms > 32)
-			wait_ms = 32;
+		if (wait_ms > 5000)
+			wait_ms = 5000;
 		if (wait_ms < 1)
 			wait_ms = 1;
 		n = 0;
@@ -3804,6 +4031,8 @@ static void wait_deadline(uint64_t deadline)
 			nanosleep(&ts, NULL);
 		}
 		drain_inputs();
+		if (screen_off != off0)
+			return;
 	}
 }
 
@@ -4532,6 +4761,20 @@ int main(void)
 	sample_uptime();
 	wifi_radio();
 	logmsg("hud running");
+	note_user();
+	t_hud_start = nsec_now();
+	t_unblank = t_hud_start;
+	/* Do not light the lamp on the GPIO-reset white cluster. */
+	pending_bl = 1;
+	pending_bl_frames = 0;
+	if (bl_path[0])
+		write_sysfs(bl_path, "0\n");
+	if (bl_power_path[0])
+		write_sysfs(bl_power_path, "4\n");
+	/* Panel may still be DCS-off from a previous HUD. */
+	if (use_gl)
+		hud_gl_blank(0);
+	drain_inputs();
 	for (;;) {
 		uint64_t now = nsec_now();
 		float dt = (float)(now - last) / 1e9f;
@@ -4548,13 +4791,20 @@ int main(void)
 		last = now;
 		pulse += dt;
 		drain_inputs();
-		if (now - t_scan_input > (npfd ? 8000000000ull : 1000000000ull)) {
+		now = nsec_now();
+		if (!screen_off && !connecting && !wifi.busy &&
+		    sheet_tgt == SHEET_NONE &&
+		    now >= t_user && now - t_user > HUD_IDLE_OFF_NS)
+			set_screen(0);
+		if (now - t_scan_input >
+		    (screen_off ? 30000000000ull :
+		     (npfd ? 8000000000ull : 1000000000ull))) {
 			scan_input();
 			t_scan_input = now;
 		}
 		poll_job();
 		maybe_confirm_join();
-		{
+		if (!screen_off) {
 			float k = 1.0f - expf(-dt * 3.0f);
 			int i;
 
@@ -4564,7 +4814,7 @@ int main(void)
 			for (i = 0; i < ncpu && i < MAX_CPU; i++)
 				cpu_core_s[i] += (cpu_core_t[i] - cpu_core_s[i]) * k;
 		}
-		{
+		if (!screen_off) {
 			float tgt = (sheet_tgt != SHEET_NONE) ? 1.0f : 0.0f;
 			float u, dur, e;
 
@@ -4590,7 +4840,7 @@ int main(void)
 				sheet_t = sheet_from + (tgt - sheet_from) * e;
 			}
 		}
-		{
+		if (!screen_off) {
 			float tgt = (osk_held && osk_hi >= 0) ? 1.0f : 0.0f;
 			float rate = (tgt > osk_u) ? 28.0f : 18.0f;
 			float k = 1.0f - expf(-dt * rate);
@@ -4603,7 +4853,7 @@ int main(void)
 				osk_anim = -1;
 			}
 		}
-		{
+		if (!screen_off) {
 			int min_sc = 0, max_sc = 0;
 			int vis = (sheet_card_h() - 240) / list_row_h();
 			float sk = 1.0f - expf(-dt * 14.0f);
@@ -4619,19 +4869,42 @@ int main(void)
 		}
 		if (screen_off) {
 			hud_dirty = 0;
-			budget = 1000000000ull;
+			budget = 5000000000ull;
+		} else if (pending_bl) {
+			/* Keep scanning while WLED is still off so DSI
+			 * HS clock settles before the user can see it. */
+			hud_dirty = 1;
+			budget = 33000000ull;
+		} else if (hud_animating()) {
+			hud_dirty = 1;
+			budget = 33000000ull;
+		} else if (connecting || wifi.busy) {
+			hud_dirty = 1;
+			budget = 80000000ull;
 		} else {
 			hud_dirty = 1;
-			budget = 0;
+			budget = 200000000ull;
 		}
 		t1 = nsec_now();
 		if (hud_dirty && !screen_off) {
 			hud_gl_set_poll(pfds, npfd);
 			render();
 			hud_gl_stats(&nv, &nf, &wait_us, &wto);
+			if (pending_bl) {
+				pending_bl_frames++;
+				if (pending_bl_frames >= HUD_UNBLANK_FRAMES)
+					restore_backlight();
+			}
+		}
+		if (pending_bl && now - t_unblank > 800000000ull)
+			restore_backlight();
+		if (!screen_off && t_unblank && !unblank_logged &&
+		    now - t_unblank > HUD_UNBLANK_METRIC_NS) {
+			unblank_metric("unblank-metric");
+			unblank_logged = 1;
 		}
 		t2 = nsec_now();
-		if (now - t_occ > 1000000000ull) {
+		if (!screen_off && now - t_occ > 1000000000ull) {
 			uint64_t ts = nsec_now();
 			unsigned us;
 
@@ -4657,7 +4930,7 @@ int main(void)
 			}
 		}
 		kick_pending();
-		if (job_pid < 0 && !connecting) {
+		if (!screen_off && job_pid < 0 && !connecting) {
 			if (sheet_tgt == SHEET_LIST && now - t_scan > 8000000000ull) {
 				wifi_scan();
 				t_scan = now;

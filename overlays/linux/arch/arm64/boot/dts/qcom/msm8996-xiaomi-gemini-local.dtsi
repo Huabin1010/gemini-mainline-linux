@@ -59,10 +59,13 @@
  */
 
 /* umeko 6.1 never got WLED OVP irq. 7.0 resolving it then enable_irq from
- * wled_ovp_work oops'd because LK left the backlight module enabled. */
+ * wled_ovp_work oops'd because LK left the backlight module enabled.
+ * Drop CABC: LK leaves string CABC on, and Linux skips re-setup when the
+ * sink mask already matches. Panel CABC PWM is not running → no light. */
 &pmi8994_wled {
 	/delete-property/ interrupts;
 	/delete-property/ interrupt-names;
+	/delete-property/ qcom,cabc;
 };
 
 /* venus firmware is on userdata; builtin probe leaves mmcc/qnoc

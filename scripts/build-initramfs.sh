@@ -54,7 +54,7 @@ if [[ -d "$ROOT/rootfs-overlay" ]]; then
 		      -f "$GLES_LIB/libGLESv2.so" && -f "$GLES_LIB/libgbm.so" &&
 		      -f "$GLES_LIB/libdrm.so" ]]; then
 			echo "==> Compiling aarch64 gemini-status (GBM/GLES2)"
-			"$CC" -O2 -Wall -Wextra \
+			"$CC" -O2 -Wall -Wextra -pthread \
 				-I"$GLES_INC" -I"$GLES_INC/libdrm" \
 				-L"$GLES_LIB" -Wl,-rpath-link,"$GLES_LIB" \
 				-o "$STAGING/overlay/usr/local/sbin/gemini-status" \
@@ -63,7 +63,7 @@ if [[ -d "$ROOT/rootfs-overlay" ]]; then
 				-lGLESv2 -lEGL -lgbm -ldrm -lm
 		else
 			echo "==> Compiling static aarch64 gemini-status (no GLES sysroot)"
-			"$CC" -static -O2 -Wall -Wextra -o \
+			"$CC" -static -O2 -Wall -Wextra -pthread -o \
 				"$STAGING/overlay/usr/local/sbin/gemini-status" \
 				"$ROOT/initramfs/gemini-status.c" \
 				"$ROOT/initramfs/gemini-status-gpu-stub.c" -lm

@@ -17,6 +17,30 @@ LOCAL="msm8996-xiaomi-gemini-local.dtsi"
 echo "==> Applying gemini DTS overlay"
 install -m 644 "$OVERLAY/arch/arm64/boot/dts/qcom/$LOCAL" "$DTS_DIR/$LOCAL"
 
+if [[ -f "$OVERLAY/drivers/video/backlight/qcom-wled.c" ]]; then
+	echo "==> Applying WLED CABC-on-LK-sink skip fix"
+	install -m 644 "$OVERLAY/drivers/video/backlight/qcom-wled.c" \
+		"$KERNEL_SRC/drivers/video/backlight/qcom-wled.c"
+fi
+
+if [[ -f "$OVERLAY/drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c" ]]; then
+	echo "==> Applying JDI R63452 panel (DCS sleep, no GPIO reset on DPMS)"
+	install -m 644 "$OVERLAY/drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c" \
+		"$KERNEL_SRC/drivers/gpu/drm/panel/panel-jdi-fhd-r63452.c"
+fi
+
+if [[ -f "$OVERLAY/drivers/gpu/drm/msm/dsi/dsi_host.c" ]]; then
+	echo "==> Applying DSI pclk RCG retry after PLL enable"
+	install -m 644 "$OVERLAY/drivers/gpu/drm/msm/dsi/dsi_host.c" \
+		"$KERNEL_SRC/drivers/gpu/drm/msm/dsi/dsi_host.c"
+fi
+
+if [[ -f "$OVERLAY/drivers/gpu/drm/msm/dsi/dsi_manager.c" ]]; then
+	echo "==> Applying DSI analog-keep (skip PHY power-down on CRTC off)"
+	install -m 644 "$OVERLAY/drivers/gpu/drm/msm/dsi/dsi_manager.c" \
+		"$KERNEL_SRC/drivers/gpu/drm/msm/dsi/dsi_manager.c"
+fi
+
 echo "==> Applying PMI8994 FG / SMBCHG drivers (msm8996-mainline)"
 install -m 644 "$OVERLAY/drivers/power/supply/qcom_fg.c" \
 	"$KERNEL_SRC/drivers/power/supply/qcom_fg.c"

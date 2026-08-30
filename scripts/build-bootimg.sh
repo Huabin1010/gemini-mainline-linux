@@ -28,7 +28,7 @@ TAGS_OFFSET=0x00000100
 # Last console= wins as /dev/console. tty0 last → fbcon is the panel console
 # (ginkgo same trick). ttyGS0 still gets a printk copy on USB ACM.
 # Do not use earlycon at 0x7570000 (BT UART). GDM stays masked.
-CMDLINE="${CMDLINE:-console=ttyGS0,115200 console=tty0 ignore_loglevel loglevel=8 clk_ignore_unused pd_ignore_unused root=/dev/disk/by-partlabel/userdata rootwait rw maxcpus=4}"
+CMDLINE="${CMDLINE:-console=ttyGS0,115200 console=tty0 ignore_loglevel loglevel=8 root=/dev/disk/by-partlabel/userdata rootwait rw maxcpus=4}"
 
 [[ -f "$KERNEL" ]] || { echo "missing $KERNEL — run scripts/build-kernel.sh first" >&2; exit 1; }
 [[ -f "$DTB" ]] || { echo "missing $DTB — run scripts/build-kernel.sh first" >&2; exit 1; }

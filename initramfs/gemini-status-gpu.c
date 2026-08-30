@@ -13,6 +13,7 @@
 #include <EGL/eglext.h>
 #include <GLES2/gl2.h>
 #include <drm_fourcc.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <gbm.h>
 #include <stddef.h>
@@ -83,6 +84,8 @@ static void (*gl_idle)(void);
 static struct pollfd gl_extra[GL_EXTRA_MAX];
 static int gl_nextra;
 static int stat_nverts, stat_nflushes, stat_wait_us, stat_wait_to;
+static int gl_runtime_off;
+static void init_atomic_ids(void);
 
 void hud_gl_set_idle(void (*fn)(void))
 {
@@ -315,6 +318,7 @@ static int init_drm(int *w, int *h)
 		return -1;
 	}
 	drmSetClientCap(kms_fd, DRM_CLIENT_CAP_UNIVERSAL_PLANES, 1);
+	drmSetClientCap(kms_fd, DRM_CLIENT_CAP_ATOMIC, 1);
 
 	res = drmModeGetResources(kms_fd);
 	if (!res) {
@@ -386,6 +390,7 @@ static int init_drm(int *w, int *h)
 	*h = mode.vdisplay;
 	drmModeFreeConnector(conn);
 	drmModeFreeResources(res);
+	init_atomic_ids();
 	return 0;
 }
 
@@ -765,9 +770,9 @@ void hud_gl_present(void)
 {
 	uint32_t fb;
 
-	flush_batch();
-	if (egl_dpy == EGL_NO_DISPLAY)
+	if (gl_runtime_off || egl_dpy == EGL_NO_DISPLAY)
 		return;
+	flush_batch();
 	eglSwapBuffers(egl_dpy, egl_surf);
 	bo_cur = gbm_surface_lock_front_buffer(gsurf);
 	if (!bo_cur) {
@@ -807,14 +812,191 @@ void hud_gl_stats(int *nverts_out, int *nflushes, int *wait_us, int *wait_to)
 		*wait_to = stat_wait_to;
 }
 
+static uint32_t primary_plane_id;
+static uint32_t prop_crtc_active, prop_plane_fb, prop_plane_crtc;
+
+static uint32_t object_prop(uint32_t obj, uint32_t type, const char *name)
+{
+	drmModeObjectProperties *props;
+	uint32_t i, id = 0;
+
+	if (kms_fd < 0 || !obj)
+		return 0;
+	props = drmModeObjectGetProperties(kms_fd, obj, type);
+	if (!props)
+		return 0;
+	for (i = 0; i < props->count_props; i++) {
+		drmModePropertyRes *p = drmModeGetProperty(kms_fd, props->props[i]);
+
+		if (p && !strcmp(p->name, name))
+			id = p->prop_id;
+		drmModeFreeProperty(p);
+		if (id)
+			break;
+	}
+	drmModeFreeObjectProperties(props);
+	return id;
+}
+
+static uint32_t connector_prop(const char *name)
+{
+	return object_prop(conn_id, DRM_MODE_OBJECT_CONNECTOR, name);
+}
+
+static void init_atomic_ids(void)
+{
+	drmModePlaneRes *pres;
+	uint32_t i;
+
+	prop_crtc_active = object_prop(crtc_id, DRM_MODE_OBJECT_CRTC, "ACTIVE");
+	pres = drmModeGetPlaneResources(kms_fd);
+	if (!pres)
+		return;
+	for (i = 0; i < pres->count_planes; i++) {
+		drmModePlane *pl = drmModeGetPlane(kms_fd, pres->planes[i]);
+
+		if (!pl)
+			continue;
+		if (pl->crtc_id == crtc_id) {
+			primary_plane_id = pl->plane_id;
+			drmModeFreePlane(pl);
+			break;
+		}
+		drmModeFreePlane(pl);
+	}
+	drmModeFreePlaneResources(pres);
+	if (primary_plane_id) {
+		prop_plane_fb = object_prop(primary_plane_id,
+					    DRM_MODE_OBJECT_PLANE, "FB_ID");
+		prop_plane_crtc = object_prop(primary_plane_id,
+					      DRM_MODE_OBJECT_PLANE, "CRTC_ID");
+	}
+}
+
+static int disable_crtc(void)
+{
+	int r;
+
+	if (kms_fd < 0 || !crtc_id)
+		return -1;
+	if (!primary_plane_id)
+		init_atomic_ids();
+	r = drmModeSetCrtc(kms_fd, crtc_id, 0, 0, 0, NULL, 0, NULL);
+	if (r == 0)
+		return 0;
+	if (prop_crtc_active && prop_plane_fb && prop_plane_crtc &&
+	    primary_plane_id) {
+		drmModeAtomicReq *req = drmModeAtomicAlloc();
+
+		if (!req)
+			return r;
+		drmModeAtomicAddProperty(req, primary_plane_id, prop_plane_fb, 0);
+		drmModeAtomicAddProperty(req, primary_plane_id, prop_plane_crtc,
+					 0);
+		drmModeAtomicAddProperty(req, crtc_id, prop_crtc_active, 0);
+		r = drmModeAtomicCommit(kms_fd, req,
+					DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
+		drmModeAtomicFree(req);
+	}
+	return r;
+}
+
+static int write_file(const char *path, const char *s)
+{
+	int fd = open(path, O_WRONLY | O_CLOEXEC);
+	ssize_t n;
+
+	if (fd < 0)
+		return -1;
+	n = write(fd, s, strlen(s));
+	close(fd);
+	return n < 0 ? -1 : 0;
+}
+
+static int panel_dcs_sleep(int off)
+{
+	DIR *d = opendir("/sys/bus/mipi-dsi/devices");
+	struct dirent *ent;
+	char path[160];
+	int ok = -1;
+
+	if (!d)
+		return -1;
+	while ((ent = readdir(d))) {
+		if (ent->d_name[0] == '.')
+			continue;
+		snprintf(path, sizeof(path),
+			 "/sys/bus/mipi-dsi/devices/%s/panel_sleep", ent->d_name);
+		if (access(path, W_OK) != 0)
+			continue;
+		ok = write_file(path, off ? "1\n" : "0\n");
+		break;
+	}
+	closedir(d);
+	return ok;
+}
+
+#ifndef DRM_MODE_DPMS_ON
+#define DRM_MODE_DPMS_ON  0
+#define DRM_MODE_DPMS_OFF 3
+#endif
+
+static int __attribute__((unused)) connector_dpms(int off)
+{
+	uint32_t id = connector_prop("DPMS");
+
+	if (!id || kms_fd < 0)
+		return -1;
+	return drmModeConnectorSetProperty(kms_fd, conn_id, id,
+					   off ? DRM_MODE_DPMS_OFF :
+						 DRM_MODE_DPMS_ON);
+}
+
 void hud_gl_blank(int off)
 {
+	uint32_t fb;
+
 	/*
-	 * Keep CRTC scanning the last frame. Disabling scanout
-	 * (SetCrtc fb=0) retrains DSI: white lines on the right and
-	 * capacitive ghosts along x=max.
+	 * 0x28 first while DSI is up, then drop CRTC so MSM runtime-suspends
+	 * MDP/DSI. Unblank modesets first so enable() can send 0x29 with
+	 * the host actually on. Do not sysfs-0x29 while PHY is down (EINVAL).
 	 */
-	(void)off;
+	if (off) {
+		if (panel_dcs_sleep(1) != 0)
+			gl_log("panel sleep failed");
+		if (egl_dpy != EGL_NO_DISPLAY &&
+		    eglGetCurrentContext() != EGL_NO_CONTEXT)
+			glFinish();
+		if (disable_crtc() != 0)
+			gl_log("CRTC disable failed");
+		crtc_set = 0;
+		if (egl_dpy != EGL_NO_DISPLAY) {
+			eglMakeCurrent(egl_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE,
+				       EGL_NO_CONTEXT);
+			gl_runtime_off = 1;
+		}
+		gl_log("display runtime off");
+		return;
+	}
+	if (gl_runtime_off && egl_dpy != EGL_NO_DISPLAY &&
+	    egl_surf != EGL_NO_SURFACE && egl_ctx != EGL_NO_CONTEXT) {
+		if (!eglMakeCurrent(egl_dpy, egl_surf, egl_surf, egl_ctx))
+			gl_log("eglMakeCurrent resume failed");
+	}
+	gl_runtime_off = 0;
+	if (kms_fd >= 0 && crtc_id && bo_prev &&
+	    (fb = fb_from_bo(bo_prev)) != 0) {
+		if (drmModeSetCrtc(kms_fd, crtc_id, fb, 0, 0, &conn_id, 1,
+				   &mode) == 0)
+			crtc_set = 1;
+		else {
+			gl_log("SetCrtc resume failed");
+			crtc_set = 0;
+		}
+	} else {
+		crtc_set = 0;
+	}
+	gl_log("display runtime on");
 }
 
 void hud_gl_shutdown(void)
